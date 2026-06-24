@@ -30,7 +30,6 @@ RUN set -ex \
  && apt-get update -y \
  && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
-            git \
             apt-transport-https \
             ca-certificates \
             curl \
@@ -41,8 +40,6 @@ RUN set -ex \
  && apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
-            libboost-dev \
-            libssl-dev \
             doxygen \
             gfortran \
             libhdf5-${MPI}-dev \
@@ -73,68 +70,6 @@ RUN set -ex \
  && rm -rf /root/* \
  && [ -f ~/.profile ] && ( sed -i 's/mesg n/( tty -s \&\& mesg n || true )/g' ~/.profile || true )
 
-# stage : veloc download 
-
-FROM main AS velocdl
-
-RUN if pip3 install --help | grep -q -- --break-system-packages; then \
-      pip3 install --break-system-packages beautifulsoup4 wget; \
-    else \
-      pip3 install beautifulsoup4 wget; \
-    fi
-
-WORKDIR /usr/veloc-src
-RUN git clone https://github.com/ECP-VeloC/VELOC.git . \
-    && mkdir -p /usr/local \
-    && python3 auto-install.py /usr/local
-
-# stage : mpich download enabling options for shared memory support 
-# shared mem support is needed for VeloC  
-FROM main AS mpichdl
-ARG MPI
-ARG DISTRO
-ARG DISTRO_VERSION
-
-RUN set -ex \
- && if [ "${MPI}" = "mpich" ] && [ "${DISTRO}" = "debian" ] && [ "${DISTRO_VERSION}" = "unstable" ]; then \
-      apt-get update -y \
-      && apt-get install -y --no-install-recommends dpkg-dev \
-      && printf "Types: deb-src\nURIs: http://deb.debian.org/debian\nSuites: ${DISTRO_VERSION}\nComponents: main\n" \
-         > /etc/apt/sources.list.d/debian-src.sources \
-      && apt-get update -y \
-      && apt-get source mpich \
-      && cd mpich-* \
-      && ./configure \
-           --prefix=/usr/local \
-           --with-ch4-shmmods=posix \
-           --with-device=ch4:ucx \
-           --enable-shared \
-           --disable-static \
-           FC=gfortran \
-      && make -j$(nproc) \
-      && make install \
-      && ldconfig; \
-    fi
-
-# stage : complete image
-
-FROM main AS complete-main
-ARG DISTRO
-ARG DISTRO_VERSION
-ARG MPI
-COPY --from=velocdl /usr/local /usr/local_veloc
-COPY --from=mpichdl /usr/local /usr/local_mpich
-RUN if [ "${MPI}" = "mpich" ] && [ "${DISTRO}" = "debian" ] && [ "${DISTRO_VERSION}" = "unstable" ]; then \
-      cp -a /usr/local_mpich/. /usr/local/ \
-      && rm -rf /usr/local_mpich; \
-    else \
-      rm -rf /usr/local_mpich; \
-    fi
-RUN printf "/usr/local_veloc/lib" > /etc/ld.so.conf.d/veloc.conf \
-    && ldconfig
-
-ENV CMAKE_PREFIX_PATH=/usr/local_veloc:${CMAKE_PREFIX_PATH}
-
 ENV PDI_SYSTEM=${DISTRO}-${DISTRO_VERSION}
 ENV PDI_COMPILER=gcc
 ENV PDI_MPI=${MPI}
@@ -147,19 +82,21 @@ ENV HOME=/home/ci
 USER ci:ci
 WORKDIR ${HOME}
 
-# stage : pdi download 
+
 
 FROM alpine/git AS pdidl
 
-RUN git -C /root clone --recurse-submodules https://github.com/iole-bolognesi/pdi.git /root/pdi
+RUN git -C /root clone --recurse-submodules https://github.com/pdidev/pdi.git /root/pdi
 
-# stage : test 
 
-FROM complete-main AS test
+
+FROM main AS test
 
 COPY --from=pdidl --chown=ci:ci /root/pdi /home/ci/pdi
 
 RUN export VERBOSE=1 \
  && bash pdi/bin/build_and_run_all_tests
 
-FROM complete-main
+
+
+FROM main
